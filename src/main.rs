@@ -4,6 +4,7 @@
 //! via eframe. The event loop runs until the user closes the window.
 
 mod app;
+mod platform;
 mod settings;
 mod storage;
 

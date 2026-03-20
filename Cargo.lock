@@ -2687,8 +2687,10 @@ dependencies = [
  "chrono",
  "eframe",
  "egui",
+ "raw-window-handle",
  "serde",
  "serde_json",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

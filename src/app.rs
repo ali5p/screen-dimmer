@@ -3,16 +3,18 @@
 //! The App::update method receives &mut self, allowing direct mutation of opacity
 //! when handling keyboard input (ownership: we own the state, borrow mutably each frame).
 
+use crate::platform;
 use crate::settings::UsageData;
 use crate::storage;
 use chrono::Timelike;
 use eframe::egui;
+use raw_window_handle::HasWindowHandle;
 use std::path::PathBuf;
 
 /// Opacity step when pressing Up/Down arrows.
 const STEP: f32 = 0.05;
 /// Maximum opacity (nearly opaque black).
-const MAX_OPACITY: f32 = 0.95;
+const MAX_OPACITY: f32 = 0.75;
 /// Minimum opacity (nearly invisible).
 const MIN_OPACITY: f32 = 0.05;
 
@@ -24,6 +26,8 @@ pub struct DimmerApp {
     usage_path: PathBuf,
     /// Cached usage data; updated and saved when opacity changes.
     usage_data: UsageData,
+    /// When true, mouse events pass through the overlay (Windows: WS_EX_TRANSPARENT).
+    click_through: bool,
 }
 
 impl DimmerApp {
@@ -40,6 +44,7 @@ impl DimmerApp {
             opacity,
             usage_path,
             usage_data,
+            click_through: true, // Default: overlay does not block mouse input
         }
     }
 
@@ -68,7 +73,7 @@ fn current_hour() -> u8 {
 }
 
 impl eframe::App for DimmerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Handle keyboard input. ctx.input() borrows input state via closure;
         // key_pressed() returns true if the key was pressed this frame.
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
@@ -76,6 +81,16 @@ impl eframe::App for DimmerApp {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
             self.decrease_opacity();
+        }
+        // Toggle click-through: 'C' key. When enabled, mouse events pass through the overlay.
+        if ctx.input(|i| i.key_pressed(egui::Key::C)) {
+            self.click_through = !self.click_through;
+        }
+
+        // Apply click-through state via Win32 API (Windows only). Uses raw_window_handle
+        // from the Frame to get HWND; modifies WS_EX_TRANSPARENT extended style.
+        if let Ok(handle) = frame.window_handle() {
+            platform::set_click_through(handle.as_raw(), self.click_through);
         }
 
         // Request repaint so opacity changes are reflected immediately.
