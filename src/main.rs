@@ -1,31 +1,21 @@
-//! Screen dimmer overlay — main entry point.
-//!
-//! Creates the window, configures the event loop, and connects egui with winit
-//! via eframe. The event loop runs until the user closes the window.
+//! Screen dimmer: Windows layered overlay (`UpdateLayeredWindow` + premultiplied BGRA).
 
-mod app;
-mod platform;
+#[cfg(windows)]
+mod windows_layered;
+
 mod settings;
 mod storage;
 
-use app::DimmerApp;
-use eframe::egui;
+#[cfg(windows)]
+fn main() {
+    if let Err(e) = windows_layered::run() {
+        eprintln!("screen-dimmer: {e}");
+        std::process::exit(1);
+    }
+}
 
-fn main() -> eframe::Result<()> {
-    // NativeOptions configures the window before the event loop starts.
-    // ViewportBuilder uses the builder pattern for window properties.
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_transparent(true)      // Required for overlay: see-through background
-            .with_decorations(false)    // Borderless: no title bar or frame
-            .with_always_on_top()      // Overlay stays above other windows
-            .with_fullscreen(true),     // Cover entire screen
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "Screen Dimmer",
-        native_options,
-        Box::new(|_cc| Ok(Box::new(DimmerApp::new()))),
-    )
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("screen-dimmer requires Windows (layered window overlay).");
+    std::process::exit(1);
 }
