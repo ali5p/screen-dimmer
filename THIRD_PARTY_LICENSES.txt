@@ -1,0 +1,9 @@
+screen-dimmer depends on the following third-party crates (direct dependencies):
+
+  chrono        0.4    MIT / Apache-2.0  https://crates.io/crates/chrono
+  serde         1.0    MIT / Apache-2.0  https://crates.io/crates/serde
+  serde_json    1.0    MIT / Apache-2.0  https://crates.io/crates/serde_json
+  windows-sys   0.52   MIT / Apache-2.0  https://crates.io/crates/windows-sys
+
+Each of these crates is dual-licensed under MIT OR Apache-2.0.
+Their transitive dependencies carry compatible licenses (MIT/Apache-2.0).

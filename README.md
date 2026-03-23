@@ -1,7 +1,26 @@
+# screen-dimmer
+
+Windows fullscreen click-through dimmer overlay.
+
+## Shortcuts (Alt+D chord)
+
+| Keys     | Action        |
+|----------|---------------|
+| Alt+S+↑  | Opacity down  |
+| Alt+S+↓  | Opacity up    |
+| Alt+S+A  | Quit          |
+
+Opacity is persisted per hour in `usage.json` (in the current working directory).
 
 
+## Build
 
-## Build (portable Windows binary)
+```powershell
+cargo build --release
+```
+
+
+## Build portable Windows binary
 
 1. Install MSYS2  
 2. In MSYS2 MINGW64 terminal:
@@ -25,3 +44,18 @@ Build:
 
 Output binary:
 target/x86_64-pc-windows-gnu/release/screen-dimmer.exe
+
+
+## Project Status
+
+This project is a personal project developed for personal use and learning purposes.
+
+
+## License
+
+MIT — see LICENSE.txt.
+
+
+## Author
+
+© 2026 Aliona Sîrf 
