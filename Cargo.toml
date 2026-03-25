@@ -3,16 +3,27 @@ name = "screen-dimmer"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+gamma_exp = ["dep:ctrlc"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
 
 [target.'cfg(windows)'.dependencies]
+ctrlc = { version = "3.4", optional = true }
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
+    "Win32_UI_ColorSystem",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[[bin]]
+name = "gamma_test"
+path = "src/bin/gamma_test.rs"
+required-features = ["gamma_exp"]

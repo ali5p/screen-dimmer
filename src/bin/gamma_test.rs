@@ -1,0 +1,44 @@
+//! Run from a terminal: `cargo run --features gamma_exp --bin gamma_test`
+//!
+//! Uses **primary display only** (`GammaController::new_primary`). Quit f.lux (and similar) while testing.
+
+use std::io::{self, Write};
+use std::thread::sleep;
+use std::time::Duration;
+
+use screen_dimmer::gamma::{install_gamma_safety_hooks, GammaController};
+
+fn wait_for_enter(msg: &str) {
+    eprintln!("{msg}");
+    let _ = io::stderr().flush();
+    let mut buf = String::new();
+    let _ = io::stdin().read_line(&mut buf);
+}
+
+fn main() {
+    println!("screen-dimmer gamma_test (primary display only)");
+    println!("Screen should look different for ~10 s, then return to normal.");
+    println!("Tip: exit f.lux temporarily. If HDR is on for the display, turn it off — legacy gamma often does not apply.\n");
+
+    let gamma = match GammaController::new_primary() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            wait_for_enter("Press Enter to close.");
+            std::process::exit(1);
+        }
+    };
+
+    install_gamma_safety_hooks(gamma.restore_snapshot());
+
+    unsafe {
+        gamma.apply(3.0, 0.2, 1.2);
+        println!("Gamma applied. Waiting 10 seconds...");
+        io::stdout().flush().ok();
+        sleep(Duration::from_secs(10));
+        gamma.restore();
+    }
+
+    println!("Restored. Done.");
+    wait_for_enter("Press Enter to close.");
+}

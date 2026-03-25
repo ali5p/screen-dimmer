@@ -2,7 +2,7 @@
 
 Windows fullscreen click-through dimmer overlay.
 
-## Shortcuts (Alt+D chord)
+## Shortcuts (Alt+S chord)
 
 | Keys     | Action        |
 |----------|---------------|
