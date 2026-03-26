@@ -167,7 +167,8 @@ unsafe fn read_ramp_on_dc(hdc: HDC) -> Option<GammaRamp> {
     }
 }
 
-/// `CreateDCW` with `NULL` then `DISPLAY` driver — some GPUs only accept one of them.
+/// Read ramp and require `SetDeviceGammaRamp` to succeed with the same ramp on that DC.
+/// Windows often allows **Get** on `GetDC(0)` but **Set** does nothing / fails — this filters that out.
 unsafe fn try_read_ramp_create_dc(device: &[u16; 32]) -> Option<GammaRamp> {
     let drivers: [*const u16; 2] = [ptr::null(), display_driver_w()];
     for &drv in &drivers {
@@ -175,23 +176,32 @@ unsafe fn try_read_ramp_create_dc(device: &[u16; 32]) -> Option<GammaRamp> {
         if hdc == 0 {
             continue;
         }
-        let out = read_ramp_on_dc(hdc);
+        let ramp = match read_ramp_on_dc(hdc) {
+            Some(r) => r,
+            None => {
+                DeleteDC(hdc);
+                continue;
+            }
+        };
+        let set_ok = SetDeviceGammaRamp(hdc, ramp.as_ptr() as *const _) != 0;
         DeleteDC(hdc);
-        if out.is_some() {
-            return out;
+        if set_ok {
+            return Some(ramp);
         }
     }
     None
 }
 
-unsafe fn set_ramp_primary(ramp: &GammaRamp, binding: PrimaryBinding) {
+unsafe fn set_ramp_primary(ramp: &GammaRamp, binding: PrimaryBinding) -> bool {
     match binding {
         PrimaryBinding::Desktop => {
             let hdc = GetDC(0 as HWND);
-            if hdc != 0 {
-                let _ = SetDeviceGammaRamp(hdc, ramp.as_ptr() as *const _);
-                ReleaseDC(0 as HWND, hdc);
+            if hdc == 0 {
+                return false;
             }
+            let ok = SetDeviceGammaRamp(hdc, ramp.as_ptr() as *const _) != 0;
+            ReleaseDC(0 as HWND, hdc);
+            ok
         }
         PrimaryBinding::NamedDevice(device) => {
             let drivers: [*const u16; 2] = [ptr::null(), display_driver_w()];
@@ -203,15 +213,16 @@ unsafe fn set_ramp_primary(ramp: &GammaRamp, binding: PrimaryBinding) {
                 let ok = SetDeviceGammaRamp(hdc, ramp.as_ptr() as *const _) != 0;
                 DeleteDC(hdc);
                 if ok {
-                    break;
+                    return true;
                 }
             }
+            false
         }
     }
 }
 
 unsafe fn restore_primary_ramp(ramp: &GammaRamp, binding: PrimaryBinding) {
-    set_ramp_primary(ramp, binding);
+    let _ = set_ramp_primary(ramp, binding);
 }
 
 struct CollectMonitorsCtx {
@@ -262,10 +273,14 @@ unsafe fn capture_primary_ramp() -> Result<(GammaRamp, PrimaryBinding), GammaErr
     let hdc = GetDC(0 as HWND);
     if hdc != 0 {
         if let Some(ramp) = read_ramp_on_dc(hdc) {
+            let set_ok = SetDeviceGammaRamp(hdc, ramp.as_ptr() as *const _) != 0;
             ReleaseDC(0 as HWND, hdc);
-            return Ok((ramp, PrimaryBinding::Desktop));
+            if set_ok {
+                return Ok((ramp, PrimaryBinding::Desktop));
+            }
+        } else {
+            ReleaseDC(0 as HWND, hdc);
         }
-        ReleaseDC(0 as HWND, hdc);
     }
 
     let mut collect = CollectMonitorsCtx {
@@ -412,6 +427,17 @@ fn build_ramp(ctx: &ApplyCtx, ramp: &mut GammaRamp) {
     }
 }
 
+/// Linear brightness curve (same RGB): `factor` 1.0 ≈ full range, **0.35** is a strong obvious dim for tests.
+fn build_ramp_linear_dim(factor: f32, ramp: &mut GammaRamp) {
+    let f = factor.clamp(0.02, 1.0);
+    for i in 0..256 {
+        let v = ((i as f32 / 255.0) * f * 65535.0).round() as u16;
+        ramp[i] = v;
+        ramp[256 + i] = v;
+        ramp[512 + i] = v;
+    }
+}
+
 pub struct GammaController {
     source: Source,
 }
@@ -439,7 +465,8 @@ impl GammaController {
         }
     }
 
-    pub unsafe fn apply(&self, gamma: f32, scale: f32, red_bias: f32) {
+    /// Returns **false** if `SetDeviceGammaRamp` failed everywhere (no visible change).
+    pub unsafe fn apply(&self, gamma: f32, scale: f32, red_bias: f32) -> bool {
         let ctx = ApplyCtx {
             gamma,
             scale,
@@ -449,15 +476,63 @@ impl GammaController {
             Source::Primary { binding, .. } => {
                 let mut ramp = [0u16; RAMP_WORDS];
                 build_ramp(&ctx, &mut ramp);
-                set_ramp_primary(&ramp, *binding);
+                set_ramp_primary(&ramp, *binding)
             }
             Source::PerMonitor(_) => {
-                let _ = EnumDisplayMonitors(
+                EnumDisplayMonitors(
                     0,
                     ptr::null(),
                     Some(apply_enum),
                     &ctx as *const _ as LPARAM,
-                );
+                ) != 0
+            }
+        }
+    }
+
+    /// Dim for tests. **`new_primary`**: scales the **captured** ramp by `factor` first (drivers often reject
+    /// purely synthetic ramps but accept this); falls back to a linear curve if that fails. `factor` ≈ **0.65**
+    /// is a clear dim; **1.0** is unchanged.
+    pub unsafe fn apply_linear_dim(&self, factor: f32) -> bool {
+        let f = factor.clamp(0.02, 1.0);
+        match &self.source {
+            Source::Primary {
+                ramp: captured,
+                binding,
+            } => {
+                let mut scaled = [0u16; RAMP_WORDS];
+                for i in 0..RAMP_WORDS {
+                    scaled[i] = ((captured[i] as f32) * f).round().min(65535.0) as u16;
+                }
+                if set_ramp_primary(&scaled, *binding) {
+                    return true;
+                }
+                let mut linear = [0u16; RAMP_WORDS];
+                build_ramp_linear_dim(f, &mut linear);
+                set_ramp_primary(&linear, *binding)
+            }
+            Source::PerMonitor(_) => {
+                let mut ramp = [0u16; RAMP_WORDS];
+                build_ramp_linear_dim(f, &mut ramp);
+                struct Ctx<'a> {
+                    ramp: &'a GammaRamp,
+                }
+                unsafe extern "system" fn linear_enum(
+                    hmon: HMONITOR,
+                    hdc: HDC,
+                    _: *mut RECT,
+                    lparam: LPARAM,
+                ) -> BOOL {
+                    let ctx = &*(lparam as *const Ctx<'_>);
+                    let _ = try_set_gamma_ramp(hmon, hdc, ctx.ramp.as_ptr());
+                    TRUE
+                }
+                let ctx = Ctx { ramp: &ramp };
+                EnumDisplayMonitors(
+                    0,
+                    ptr::null(),
+                    Some(linear_enum),
+                    &ctx as *const _ as LPARAM,
+                ) != 0
             }
         }
     }

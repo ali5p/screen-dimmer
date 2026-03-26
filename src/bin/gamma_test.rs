@@ -16,9 +16,9 @@ fn wait_for_enter(msg: &str) {
 }
 
 fn main() {
-    println!("screen-dimmer gamma_test (primary display only)");
-    println!("Screen should look different for ~10 s, then return to normal.");
-    println!("Tip: exit f.lux temporarily. If HDR is on for the display, turn it off — legacy gamma often does not apply.\n");
+    println!("screen-dimmer gamma_test — experimental **gamma ramp** dim (not the overlay app)");
+    println!("The whole screen should look obviously darker for ~10 s, then normalize.");
+    println!("Tip: exit f.lux. If HDR is on, turn it off — legacy gamma often does not apply.\n");
 
     let gamma = match GammaController::new_primary() {
         Ok(g) => g,
@@ -32,8 +32,13 @@ fn main() {
     install_gamma_safety_hooks(gamma.restore_snapshot());
 
     unsafe {
-        gamma.apply(3.0, 0.2, 1.2);
-        println!("Gamma applied. Waiting 10 seconds...");
+        // Scale the *captured* ramp (driver-friendly); 0.55–0.65 is usually a clear dim.
+        let ok = gamma.apply_linear_dim(0.6);
+        if !ok {
+            eprintln!("Warning: SetDeviceGammaRamp failed (scaled + linear fallback) — no dimming.");
+        } else {
+            println!("Gamma ramp applied (~60% of captured curve). Waiting 10 seconds...");
+        }
         io::stdout().flush().ok();
         sleep(Duration::from_secs(10));
         gamma.restore();
