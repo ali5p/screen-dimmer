@@ -1,8 +1,8 @@
 //! Single HWND layered overlay: `UpdateLayeredWindow` + premultiplied BGRA buffer.
 //!
 //! - `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT` — always click-through.
-//! - **Alt+D+↑/↓** adjusts opacity; **Alt+D+Q** quits. Plain **Ctrl+arrows**, **Alt+F4**, and **Q**
-//!   (without **Alt+D**) stay for other apps. Chords use `GetAsyncKeyState` (edge-triggered).
+//! - **Alt+S+↑/↓** adjusts opacity; **Alt+S+A** quits. Plain **Ctrl+arrows**, **Alt+F4**, and **Q**
+//!   (without **Alt+S**) stay for other apps. Chords use `GetAsyncKeyState` (edge-triggered).
 //! - Buffer + `UpdateLayeredWindow` only when opacity changes.
 //! - Window spans the **virtual screen** (all monitors) via `GetSystemMetrics`.
 

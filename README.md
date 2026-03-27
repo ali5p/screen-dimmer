@@ -45,6 +45,9 @@ Build:
 Output binary:
 target/x86_64-pc-windows-gnu/release/screen-dimmer.exe
 
+### Experimental thread
+cargo run --features gamma_exp --bin gamma_test
+
 
 ## Project Status
 
