@@ -6,7 +6,9 @@ use std::io::{self, Write};
 use std::thread::sleep;
 use std::time::Duration;
 
-use screen_dimmer::gamma::{install_gamma_safety_hooks, GammaController};
+use screen_dimmer::gamma::{
+    install_gamma_safety_hooks, GammaController, LinearDimResult,
+};
 
 fn wait_for_enter(msg: &str) {
     eprintln!("{msg}");
@@ -16,7 +18,7 @@ fn wait_for_enter(msg: &str) {
 }
 
 fn main() {
-    println!("screen-dimmer gamma_test — experimental **gamma ramp** dim (not the overlay app)");
+    println!("screen-dimmer gamma_test — experimental **gamma ramp** dim");
     println!("The whole screen should look obviously darker for ~10 s, then normalize.");
     println!("Tip: exit f.lux. If HDR is on, turn it off — legacy gamma often does not apply.\n");
 
@@ -32,12 +34,17 @@ fn main() {
     install_gamma_safety_hooks(gamma.restore_snapshot());
 
     unsafe {
-        // Scale the *captured* ramp (driver-friendly); 0.55–0.65 is usually a clear dim.
-        let ok = gamma.apply_linear_dim(0.6);
-        if !ok {
-            eprintln!("Warning: SetDeviceGammaRamp failed (scaled + linear fallback) — no dimming.");
-        } else {
-            println!("Gamma ramp applied (~60% of captured curve). Waiting 10 seconds...");
+        // Scale the *captured* ramp first; 0.55–0.65 is usually a clear dim.
+        match gamma.apply_linear_dim(0.6) {
+            LinearDimResult::ScaledCaptured => {
+                println!("Applied: scaled captured ramp (~60%). Waiting 10 seconds...");
+            }
+            LinearDimResult::SyntheticLinear => {
+                println!("Applied: synthetic linear fallback (scale refused). Waiting 10 seconds...");
+            }
+            LinearDimResult::Failed => {
+                eprintln!("Warning: both scaled and linear Set failed — no dimming.");
+            }
         }
         io::stdout().flush().ok();
         sleep(Duration::from_secs(10));

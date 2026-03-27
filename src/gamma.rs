@@ -144,6 +144,27 @@ impl std::fmt::Display for GammaError {
 
 impl std::error::Error for GammaError {}
 
+/// Which ramp shape `apply_linear_dim` successfully applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearDimResult {
+    /// Primary path: **`captured × factor`** was accepted.
+    ScaledCaptured,
+    /// Synthetic **linear** curve (primary path after scale refused, or multi-monitor test apply).
+    SyntheticLinear,
+    /// `SetDeviceGammaRamp` failed for both attempts on primary, or enumeration failed on multi.
+    Failed,
+}
+
+impl std::fmt::Display for LinearDimResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LinearDimResult::ScaledCaptured => "scaled captured ramp (driver kept curve shape)",
+            LinearDimResult::SyntheticLinear => "synthetic linear ramp",
+            LinearDimResult::Failed => "no ramp applied",
+        })
+    }
+}
+
 fn display_driver_w() -> *const u16 {
     const S: [u16; 8] = [
         b'D' as u16,
@@ -489,10 +510,11 @@ impl GammaController {
         }
     }
 
-    /// Dim for tests. **`new_primary`**: scales the **captured** ramp by `factor` first (drivers often reject
-    /// purely synthetic ramps but accept this); falls back to a linear curve if that fails. `factor` ≈ **0.65**
-    /// is a clear dim; **1.0** is unchanged.
-    pub unsafe fn apply_linear_dim(&self, factor: f32) -> bool {
+    /// Dim for tests. **`new_primary`**: scales the **captured** ramp by `factor` first; if that `Set` fails,
+    /// falls back to a synthetic linear curve. `factor` ≈ **0.65** is a clear dim; **1.0** is unchanged.
+    ///
+    /// Inspect [`LinearDimResult`] to see **scaled captured** vs **synthetic linear** (or failure).
+    pub unsafe fn apply_linear_dim(&self, factor: f32) -> LinearDimResult {
         let f = factor.clamp(0.02, 1.0);
         match &self.source {
             Source::Primary {
@@ -504,11 +526,14 @@ impl GammaController {
                     scaled[i] = ((captured[i] as f32) * f).round().min(65535.0) as u16;
                 }
                 if set_ramp_primary(&scaled, *binding) {
-                    return true;
+                    return LinearDimResult::ScaledCaptured;
                 }
                 let mut linear = [0u16; RAMP_WORDS];
                 build_ramp_linear_dim(f, &mut linear);
-                set_ramp_primary(&linear, *binding)
+                if set_ramp_primary(&linear, *binding) {
+                    return LinearDimResult::SyntheticLinear;
+                }
+                LinearDimResult::Failed
             }
             Source::PerMonitor(_) => {
                 let mut ramp = [0u16; RAMP_WORDS];
@@ -527,12 +552,17 @@ impl GammaController {
                     TRUE
                 }
                 let ctx = Ctx { ramp: &ramp };
-                EnumDisplayMonitors(
+                if EnumDisplayMonitors(
                     0,
                     ptr::null(),
                     Some(linear_enum),
                     &ctx as *const _ as LPARAM,
                 ) != 0
+                {
+                    LinearDimResult::SyntheticLinear
+                } else {
+                    LinearDimResult::Failed
+                }
             }
         }
     }
