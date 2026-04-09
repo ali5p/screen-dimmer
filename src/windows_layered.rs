@@ -1,8 +1,9 @@
 //! Single HWND layered overlay: `UpdateLayeredWindow` + premultiplied BGRA buffer.
 //!
 //! - `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT` — always click-through.
-//! - **Alt+S+↑/↓** adjusts opacity; **Alt+S+A** quits. Plain **Ctrl+arrows**, **Alt+F4**, and **Q**
-//!   (without **Alt+S**) stay for other apps. Chords use `GetAsyncKeyState` (edge-triggered).
+//! - **Alt+S+↑/↓** adjusts opacity; **Alt+S+A** quits. Chords use `GetAsyncKeyState` (edge-triggered).
+//! - **Control panel**: **▼** darker, **▲** brighter, **×** quit, **−** collapse (minimize panel only).
+//! - Overlay uses `WS_EX_TOOLWINDOW` so it does **not** get a taskbar button (only the control panel does).
 //! - Buffer + `UpdateLayeredWindow` only when opacity changes.
 //! - Window spans the **virtual screen** (all monitors) via `GetSystemMetrics`.
 
@@ -10,13 +11,14 @@ use crate::settings::UsageData;
 use crate::storage;
 use chrono::Timelike;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, TRUE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
-    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
-    HBITMAP, HDC, HGDIOBJ, RGBQUAD,
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetStockObject, ReleaseDC,
+    SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
+    DIB_RGB_COLORS, HBITMAP, HBRUSH, HDC, HGDIOBJ, RGBQUAD, WHITE_BRUSH,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -25,15 +27,29 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetSystemMetrics,
     GetWindowLongPtrW, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW, SetWindowLongPtrW,
-    ShowWindow, TranslateMessage, UnregisterClassW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, IDC_ARROW,
-    MSG, PM_REMOVE, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, ULW_ALPHA, WM_DESTROY, WM_NCDESTROY, WM_QUIT,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    ShowWindow, TranslateMessage, UnregisterClassW, BN_CLICKED, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, MSG, PM_REMOVE, SM_CXSCREEN, SM_CXVIRTUALSCREEN,
+    SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_MINIMIZE, SW_SHOW,
+    ULW_ALPHA, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_NCDESTROY, WM_QUIT, WNDCLASSW, WS_BORDER,
+    WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT, WS_POPUP,
+    WS_SYSMENU, WS_VISIBLE,
 };
 
 const STEP: f32 = 0.05;
 const MAX_OPACITY: f32 = 0.95;
 const MIN_OPACITY: f32 = 0.05;
+
+const IDC_BTN_DARKER: isize = 1001;
+const IDC_BTN_BRIGHTER: isize = 1002;
+const IDC_BTN_QUIT: isize = 1003;
+const IDC_BTN_COLLAPSE: isize = 1004;
+
+const PANEL_W: i32 = 248;
+const PANEL_H: i32 = 96;
+
+/// `(overlay HWND, control panel HWND)` for coordinated shutdown.
+static APP_WINDOWS: Mutex<Option<(HWND, HWND)>> = Mutex::new(None);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -65,7 +81,7 @@ fn key_down(vk: u16) -> bool {
     unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
 }
 
-/// Alt+D held together — prefix for dimmer-only shortcuts.
+/// Alt+S held together — prefix for dimmer-only shortcuts.
 fn dimmer_chord_down() -> bool {
     key_down(VK_MENU) && key_down(VK_S)
 }
@@ -113,7 +129,7 @@ impl ChordEdges {
                 }
             }
             if quit_key && !self.quit {
-                DestroyWindow(hwnd);
+                quit_app_shared();
             }
         }
 
@@ -313,6 +329,143 @@ fn state_mut(hwnd: HWND) -> Option<*mut OverlayState> {
     }
 }
 
+unsafe fn adjust_opacity_delta(overlay_hwnd: HWND, delta: f32) {
+    let Some(ptr) = state_mut(overlay_hwnd) else {
+        return;
+    };
+    let state = &mut *ptr;
+    let prev = state.alpha_byte;
+    state.set_opacity_f32(state.opacity_f32() + delta);
+    if state.alpha_byte != prev {
+        state.fill_bits();
+        let _ = state.update_layered_window(overlay_hwnd);
+        state.save_usage();
+    }
+}
+
+unsafe fn quit_app_shared() {
+    let pair = APP_WINDOWS.lock().unwrap().take();
+    if let Some((overlay, panel)) = pair {
+        if overlay != 0 {
+            DestroyWindow(overlay);
+        }
+        if panel != 0 {
+            DestroyWindow(panel);
+        }
+    }
+    PostQuitMessage(0);
+}
+
+unsafe extern "system" fn panel_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_CREATE => {
+            let cs = lparam as *const CREATESTRUCTW;
+            let overlay = (*cs).lpCreateParams as HWND;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, overlay as isize);
+            let inst = (*cs).hInstance;
+            let btn = wide("Button\0");
+            let darker = wide("▼\0");
+            let brighter = wide("▲\0");
+            let quit_lbl = wide("×\0");
+            let collapse = wide("−\0");
+            let style = WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON as u32;
+            let bw = 52i32;
+            let gap = 8i32;
+            let mut x = 8i32;
+            let y = 10i32;
+            let h = 28i32;
+            CreateWindowExW(
+                0,
+                btn.as_ptr(),
+                darker.as_ptr(),
+                style,
+                x,
+                y,
+                bw,
+                h,
+                hwnd,
+                IDC_BTN_DARKER as HMENU,
+                inst,
+                std::ptr::null_mut(),
+            );
+            x += bw + gap;
+            CreateWindowExW(
+                0,
+                btn.as_ptr(),
+                brighter.as_ptr(),
+                style,
+                x,
+                y,
+                bw,
+                h,
+                hwnd,
+                IDC_BTN_BRIGHTER as HMENU,
+                inst,
+                std::ptr::null_mut(),
+            );
+            x += bw + gap;
+            CreateWindowExW(
+                0,
+                btn.as_ptr(),
+                quit_lbl.as_ptr(),
+                style,
+                x,
+                y,
+                bw,
+                h,
+                hwnd,
+                IDC_BTN_QUIT as HMENU,
+                inst,
+                std::ptr::null_mut(),
+            );
+            x += bw + gap;
+            CreateWindowExW(
+                0,
+                btn.as_ptr(),
+                collapse.as_ptr(),
+                style,
+                x,
+                y,
+                bw,
+                h,
+                hwnd,
+                IDC_BTN_COLLAPSE as HMENU,
+                inst,
+                std::ptr::null_mut(),
+            );
+            0
+        }
+        WM_COMMAND => {
+            let id = (wparam as u32) & 0xffff;
+            let code = ((wparam as u32) >> 16) & 0xffff;
+            if code == BN_CLICKED {
+                let overlay = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as HWND;
+                match id as isize {
+                    IDC_BTN_DARKER if overlay != 0 => adjust_opacity_delta(overlay, STEP),
+                    IDC_BTN_BRIGHTER if overlay != 0 => adjust_opacity_delta(overlay, -STEP),
+                    IDC_BTN_QUIT => quit_app_shared(),
+                    IDC_BTN_COLLAPSE => {
+                        ShowWindow(hwnd, SW_MINIMIZE);
+                    }
+                    _ => {}
+                }
+            }
+            0
+        }
+        WM_CLOSE => {
+            quit_app_shared();
+            0
+        }
+        WM_DESTROY => DefWindowProcW(hwnd, msg, wparam, lparam),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
 pub fn run() -> Result<(), String> {
     let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
     if instance == 0 {
@@ -342,7 +495,7 @@ pub fn run() -> Result<(), String> {
     let title = wide("Screen Dimmer (layered)\0");
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT,
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
             class_name.as_ptr(),
             title.as_ptr(),
             WS_POPUP,
@@ -377,6 +530,64 @@ pub fn run() -> Result<(), String> {
         ShowWindow(hwnd, SW_SHOW);
     }
 
+    let panel_class = wide("ScreenDimmerPanel\0");
+    let panel_title = wide("Screen Dimmer\0");
+    let pwc = WNDCLASSW {
+        style: CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: Some(panel_wnd_proc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: instance,
+        hIcon: 0,
+        hCursor: unsafe { LoadCursorW(0, IDC_ARROW) },
+        hbrBackground: unsafe { GetStockObject(WHITE_BRUSH) as HBRUSH },
+        lpszMenuName: std::ptr::null(),
+        lpszClassName: panel_class.as_ptr(),
+    };
+
+    if unsafe { RegisterClassW(&pwc) } == 0 {
+        unsafe {
+            DestroyWindow(hwnd);
+            UnregisterClassW(class_name.as_ptr(), instance);
+        }
+        return Err("RegisterClassW (panel) failed".into());
+    }
+
+    let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+    let px = sw - PANEL_W - 24;
+    let py = sh - PANEL_H - 72;
+
+    let panel_hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_APPWINDOW,
+            panel_class.as_ptr(),
+            panel_title.as_ptr(),
+            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_BORDER,
+            px,
+            py,
+            PANEL_W,
+            PANEL_H,
+            0,
+            0,
+            instance,
+            hwnd as *mut std::ffi::c_void,
+        )
+    };
+    if panel_hwnd == 0 {
+        unsafe {
+            DestroyWindow(hwnd);
+            UnregisterClassW(panel_class.as_ptr(), instance);
+            UnregisterClassW(class_name.as_ptr(), instance);
+        }
+        return Err("CreateWindowExW (panel) failed".into());
+    }
+
+    unsafe {
+        *APP_WINDOWS.lock().unwrap() = Some((hwnd, panel_hwnd));
+        ShowWindow(panel_hwnd, SW_MINIMIZE);
+    }
+
     let mut msg = unsafe { std::mem::zeroed::<MSG>() };
     let mut chord = ChordEdges::default();
 
@@ -386,6 +597,8 @@ pub fn run() -> Result<(), String> {
         unsafe {
             while PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) != 0 {
                 if msg.message == WM_QUIT {
+                    let _ = APP_WINDOWS.lock().unwrap().take();
+                    UnregisterClassW(panel_class.as_ptr(), instance);
                     UnregisterClassW(class_name.as_ptr(), instance);
                     return Ok(());
                 }
