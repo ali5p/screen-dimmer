@@ -2,7 +2,7 @@
 //!
 //! - `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT` — always click-through.
 //! - **Alt+S+↑/↓** adjusts opacity; **Alt+S+A** quits. Chords use `GetAsyncKeyState` (edge-triggered).
-//! - **Control panel**: **▼** darker, **▲** brighter, **×** quit, **−** collapse (minimize panel only).
+//! - **Control panel**: **▼** darker, **▲** brighter, **×** quit, **−** collapse. 
 //! - Overlay uses `WS_EX_TOOLWINDOW` so it does **not** get a taskbar button (only the control panel does).
 //! - Buffer + `UpdateLayeredWindow` only when opacity changes.
 //! - Window spans the **virtual screen** (all monitors) via `GetSystemMetrics`.
@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, TRUE, WPARAM};
+use windows_sys::Win32::Foundation::{COLORREF, FALSE, HWND, LPARAM, LRESULT, POINT, SIZE, TRUE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetStockObject, ReleaseDC,
     SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
@@ -25,15 +25,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_S, VK_DOWN, VK_MENU, VK_A, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetSystemMetrics,
-    GetWindowLongPtrW, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW, SetWindowLongPtrW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, DrawMenuBar, GetSystemMetrics,
+    GetSystemMenu, GetWindowLongPtrW, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW,
+    RemoveMenu, SetWindowLongPtrW,
     ShowWindow, TranslateMessage, UnregisterClassW, BN_CLICKED, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW,
     CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW, MSG, PM_REMOVE, SM_CXSCREEN, SM_CXVIRTUALSCREEN,
     SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_MINIMIZE, SW_SHOW,
     ULW_ALPHA, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_NCDESTROY, WM_QUIT, WNDCLASSW, WS_BORDER,
     WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW,
     WS_EX_TRANSPARENT, WS_POPUP,
-    WS_SYSMENU, WS_VISIBLE,
+    WS_SYSMENU, WS_VISIBLE, MF_BYCOMMAND, SC_CLOSE,
 };
 
 const STEP: f32 = 0.05;
@@ -438,6 +439,11 @@ unsafe extern "system" fn panel_wnd_proc(
                 inst,
                 std::ptr::null_mut(),
             );
+            let sm = GetSystemMenu(hwnd, FALSE);
+            if sm != 0 {
+                let _ = RemoveMenu(sm, SC_CLOSE, MF_BYCOMMAND);
+                let _ = DrawMenuBar(hwnd);
+            }
             0
         }
         WM_COMMAND => {
